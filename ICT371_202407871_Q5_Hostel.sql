@@ -206,26 +206,39 @@ BEGIN
 END;
 $$;
 
-CREATE EXTENSION IF NOT EXISTS pg_cron;
 
-SELECT cron.schedule('q5_refresh_occupancy', '55 23 * * *',
-                     $$CALL q5_hostel.pr_refresh_occupancy()$$);
+-- Safe scheduling: runs only if pg_cron is available on this server.
+-- If it is not installed you will just see a NOTICE and the rest of the script still works.
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_available_extensions WHERE name = 'pg_cron') THEN
+        CREATE EXTENSION IF NOT EXISTS pg_cron;
+        PERFORM cron.schedule('q5_refresh_occupancy', '55 23 * * *', $cmd$CALL q5_hostel.pr_refresh_occupancy()$cmd$);
+        RAISE NOTICE 'Job q5_refresh_occupancy scheduled: 55 23 * * *';
+    ELSE
+        RAISE NOTICE 'pg_cron is not installed on this server - job NOT scheduled. Schedule used: 55 23 * * *';
+    END IF;
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'Could not schedule job (q5_refresh_occupancy): %', SQLERRM;
+END
+$do$;
 
-SELECT jobid, jobname, schedule, command, active FROM cron.job WHERE jobname = 'q5_refresh_occupancy';
+-- Inspect job / history (uncomment where pg_cron is installed):
+-- SELECT jobid, jobname, schedule, command, active FROM cron.job WHERE jobname = 'q5_refresh_occupancy';
 -- SELECT * FROM cron.job_run_details ORDER BY start_time DESC LIMIT 10;
 
 -- =====================================================================
 -- TESTS / EVIDENCE
 -- =====================================================================
-\echo '--- (a)/(e) Full, partly occupied and empty rooms ---'
+SELECT '--- (a)/(e) Full, partly occupied and empty rooms ---' AS section;
 SELECT * FROM v_room_occupancy ORDER BY room_id;
 
-\echo '--- (b) Function ---'
+SELECT '--- (b) Function ---' AS section;
 SELECT room_id, fn_free_beds(room_id) AS free_beds FROM rooms ORDER BY room_id;   -- 0, 2, 2
 DO $$ BEGIN PERFORM fn_free_beds(999);
    EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'EXPECTED ERROR (unknown room): %', SQLERRM; END $$;
 
-\echo '--- (c) Procedure ---'
+SELECT '--- (c) Procedure ---' AS section;
 DO $$ BEGIN CALL pr_allocate_room(99, 3, CURRENT_DATE);
    EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'EXPECTED ERROR (unknown student): %', SQLERRM; END $$;
 DO $$ BEGIN CALL pr_allocate_room(5, 99, CURRENT_DATE);
@@ -237,7 +250,7 @@ DO $$ BEGIN CALL pr_allocate_room(4, 1, CURRENT_DATE);                -- R101 fu
 CALL pr_allocate_room(5, 3, CURRENT_DATE);                            -- valid
 SELECT * FROM allocations ORDER BY allocation_id;
 
-\echo '--- (d) Trigger: direct SQL ---'
+SELECT '--- (d) Trigger: direct SQL ---' AS section;
 DO $$ BEGIN INSERT INTO allocations (student_id, room_id, allocated_on, status)
             VALUES (4, 1, CURRENT_DATE, 'ACTIVE');                    -- R101 full
    EXCEPTION WHEN OTHERS THEN RAISE NOTICE 'EXPECTED ERROR (capacity, direct insert): %', SQLERRM; END $$;
@@ -249,15 +262,15 @@ DO $$ BEGIN UPDATE allocations SET room_id = 1 WHERE student_id = 3 AND status =
 -- Updating a row inside the full room R101 must still work (it excludes itself):
 UPDATE allocations SET allocated_on = allocated_on WHERE allocation_id = 1;
 
-\echo '--- (e) View after allocation (R103 no longer empty) ---'
+SELECT '--- (e) View after allocation (R103 no longer empty) ---' AS section;
 SELECT * FROM v_room_occupancy ORDER BY room_id;
 
-\echo '--- (f) EXPLAIN ---'
+SELECT '--- (f) EXPLAIN ---' AS section;
 SET enable_seqscan = off;
 EXPLAIN SELECT * FROM allocations WHERE room_id = 1 AND status = 'ACTIVE';
 RESET enable_seqscan;
 
-\echo '--- (g) Run twice: one row per date+room ---'
+SELECT '--- (g) Run twice: one row per date+room ---' AS section;
 CALL pr_refresh_occupancy();
 SELECT * FROM occupancy_snapshot ORDER BY room_id;
 CALL pr_refresh_occupancy();
